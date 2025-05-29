@@ -88,3 +88,99 @@
         ERR_INSUFFICIENT_POWER_CREDITS)
     )
 )
+
+;; Public functions
+(define-public (onboard_clean_generator (initial_token_price uint))
+    (let ((generator_wallet tx-sender))
+        (asserts! (is-none (map-get? clean_power_generators generator_wallet)) ERR_ACCOUNT_ALREADY_EXISTS)
+        (asserts! (and (> initial_token_price u0) (<= initial_token_price (var-get maximum_price_cap))) ERR_PRICE_OUT_OF_RANGE)
+        (ok (map-set clean_power_generators generator_wallet {
+            total_watts_generated: u0,
+            certification_active: false,
+            onboarding_block: block-height,
+            watts_per_token_rate: initial_token_price
+        }))
+    )
+)
+
+(define-public (onboard_power_buyer)
+    (let ((buyer_wallet tx-sender))
+        (asserts! (is-none (map-get? power_buyers buyer_wallet)) ERR_ACCOUNT_ALREADY_EXISTS)
+        (ok (map-set power_buyers buyer_wallet {
+            total_watts_purchased: u0,
+            available_power_tokens: u0,
+            account_creation_block: block-height
+        }))
+    )
+)
+
+(define-public (log_clean_power_generation (watts_produced uint))
+    (let (
+        (generator_wallet tx-sender)
+        (generator_profile (unwrap! (map-get? clean_power_generators generator_wallet) ERR_GENERATOR_NOT_REGISTERED))
+    )
+    (asserts! (get certification_active generator_profile) ERR_ACCESS_DENIED)
+    (ok (map-set clean_power_generators generator_wallet
+        (merge generator_profile 
+            {total_watts_generated: (+ (get total_watts_generated generator_profile) watts_produced)})))
+    )
+)
+
+(define-public (initiate_power_trade (generator_wallet principal) (watts_quantity uint))
+    (let (
+        (purchaser_wallet tx-sender)
+        (generator_profile (unwrap! (map-get? clean_power_generators generator_wallet) ERR_GENERATOR_NOT_REGISTERED))
+        (purchaser_profile (unwrap! (map-get? power_buyers purchaser_wallet) ERR_BUYER_NOT_REGISTERED))
+        (transaction_id (+ (var-get next_transaction_id) u1))
+        (total_cost (* watts_quantity (get watts_per_token_rate generator_profile)))
+    )
+    (asserts! (is-some (map-get? clean_power_generators generator_wallet)) ERR_GENERATOR_ADDRESS_INVALID)
+    (asserts! (>= watts_quantity (var-get minimum_trade_threshold)) ERR_INVALID_POWER_AMOUNT)
+    (try! (execute_power_transfer generator_wallet purchaser_wallet watts_quantity))
+    (var-set next_transaction_id transaction_id)
+    (ok (map-set marketplace_transactions transaction_id {
+        power_supplier: generator_wallet,
+        power_purchaser: purchaser_wallet,
+        watts_traded: watts_quantity,
+        final_price: total_cost,
+        trade_block: block-height,
+        execution_status: "completed"
+    }))
+    )
+)
+
+;; Admin functions
+(define-public (certify_clean_generator (generator_wallet principal))
+    (let ((admin_wallet tx-sender))
+        (asserts! (is-eq admin_wallet (var-get marketplace_owner)) ERR_ACCESS_DENIED)
+        (asserts! (is-some (map-get? clean_power_generators generator_wallet)) ERR_GENERATOR_NOT_REGISTERED)
+        (match (map-get? clean_power_generators generator_wallet)
+            generator_profile (ok (map-set clean_power_generators generator_wallet 
+                (merge generator_profile {certification_active: true})))
+            ERR_GENERATOR_NOT_REGISTERED)
+    )
+)
+
+(define-public (adjust_platform_fee_rate (new_fee_rate uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get marketplace_owner)) ERR_ACCESS_DENIED)
+        (asserts! (<= new_fee_rate u100) ERR_INVALID_POWER_AMOUNT)
+        (ok (var-set platform_fee_percentage new_fee_rate))
+    )
+)
+
+(define-public (modify_minimum_trade_size (new_minimum_watts uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get marketplace_owner)) ERR_ACCESS_DENIED)
+        (asserts! (> new_minimum_watts u0) ERR_INVALID_POWER_AMOUNT)
+        (ok (var-set minimum_trade_threshold new_minimum_watts))
+    )
+)
+
+;; Contract initialization
+(begin
+    (var-set next_transaction_id u0)
+    (var-set minimum_trade_threshold u100)
+    (var-set platform_fee_percentage u2)
+    (var-set maximum_price_cap u1000000)
+)
